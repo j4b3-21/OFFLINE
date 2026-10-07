@@ -18,7 +18,7 @@ The planner is the `LocalModel` behind `src/ai/active-model.ts`: `MockModel` by 
 
 ## Navigation
 
-`navigation-engine.ts` calculates nearest route point, route progress, approaching-instruction state, completion, and a configurable off-route state. It does not use the model for navigation decisions. `safety-engine.ts` validates the experience and instructions independently.
+`navigation-engine.ts` calculates nearest route point, route progress, approaching-instruction state, completion, and a configurable off-route state. It does not use the model for navigation decisions. `safety-engine.ts` validates the experience and instructions independently. Consecutive GPS samples are validated (`isReasonableLocationSample`) so a sensor jump is treated as no movement instead of motion or an off-route event; the walking guide remains re-connectable after an interrupted session ("Reconnect GPS guide").
 
 ## Recovery
 
