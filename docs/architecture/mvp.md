@@ -35,7 +35,7 @@ ExperiencePlan + NavigationState + Location
 
 `resolveCueContext(plan, navigation, location)` returns only what the walk can honestly claim: the nearest landmark whose coordinate is within `LANDMARK_CUE_RADIUS_METERS` (400 m, inclusive-in), and the mission whose progress bracket the route currently passes through. Any missing input (no plan, no navigation, no location) resolves to an empty context, so a walk that never had location degrades to ambient cues — it never claims plan knowledge it does not have. The mission index is a deterministic function of route progress, never a wall-clock read.
 
-The walking monitor requires `dependencies.cueContext()` and populates `WalkingState.landmarkAhead`/`mission` on every check. The mock's `walkingCue` replaces the ambient cue at most once per landmark or mission (deduplicated against `recentCueHistory`); otherwise the existing movement-state ambient pool is used unchanged. Frequency and cadence of cues are unaffected. See `docs/integrations.md` for the exact cue rules.
+The walking monitor requires `dependencies.cueContext()` and populates `WalkingState.landmarkAhead`/`mission` on every check. The mock's `walkingCue` replaces the ambient cue for a landmark or mission until it rolls out of the `recentCueHistory` window (deduplicated against that history); otherwise the existing movement-state ambient pool is used unchanged. Frequency and cadence of cues are unaffected. See `docs/integrations.md` for the exact cue rules.
 
 ## Plan variants (modes + time)
 

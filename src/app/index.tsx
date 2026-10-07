@@ -664,7 +664,7 @@ export default function HomeScreen() {
                 <PrimaryButton label="Read my debrief" onPress={speakDebrief} />
               )}
               <PrimaryButton
-                label="Plan another quiet walk"
+                label="Plan another walk"
                 onPress={() => {
                   setPlan(undefined);
                   setSession(undefined);

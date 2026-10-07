@@ -209,7 +209,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function formatMissions(session: SessionRecord, plan?: ExperiencePlan): string {
   const completed = session.metrics.missionCompletions;
-  return plan ? `${completed} / ${plan.missions.length}` : `${completed}`;
+  return plan ? `${completed} / ${plan.missions.length}` : '—';
 }
 
 function formatDate(value?: string): string {
