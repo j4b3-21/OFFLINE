@@ -31,7 +31,7 @@ import {
   transitionSession,
 } from '@/session/session-engine';
 import type { ExperiencePlan, Location, SessionRecord } from '@/domain/experience';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { useTheme } from '@/hooks/use-theme';
@@ -692,7 +692,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     paddingHorizontal: Spacing.four,
     paddingTop: Spacing.five,
-    paddingBottom: BottomTabInset + Spacing.five,
+    paddingBottom: Spacing.five,
     gap: Spacing.three,
   },
   eyebrow: { letterSpacing: 1.5 },
