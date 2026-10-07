@@ -11,17 +11,32 @@ Prefer fewer interventions, physical-world observations, and short cues.
 Never generate safety-critical routing instructions; return preferences for deterministic routing.
 Never ask the user to continue interacting with you.`;
 
+/**
+ * TinyLlama walking prompt. Landmark/mission context is threaded through so
+ * the real-model prompt stays aligned with the mock's deterministic rules,
+ * but the on-device TinyLlama engine is not yet the active cue generator —
+ * MockModel implements these rules today.
+ */
 export function walkingPrompt(state: {
   movementState: string;
   distanceMovedMeters: number;
   elapsedSeconds: number;
   recentCueHistory: string[];
+  landmarkAhead?: { title: string; description: string };
+  mission?: { prompt: string };
 }) {
+  const planContext = [
+    state.landmarkAhead ? `Landmark ahead: ${state.landmarkAhead.title} — ${state.landmarkAhead.description}` : null,
+    state.mission ? `Active mission: ${state.mission.prompt}` : null,
+  ]
+    .filter((line): line is string => line !== null)
+    .join('\n');
   return `You provide one short walking cue inside OFFLINE.
 Generate one short spoken encouragement for the person walking.
 Movement state: ${state.movementState}
 Distance moved: ${state.distanceMovedMeters.toFixed(1)} meters in ${state.elapsedSeconds.toFixed(0)} seconds.
 Recent cues to avoid repeating: ${JSON.stringify(state.recentCueHistory)}
+${planContext ? `Plan context:\n${planContext}` : 'Plan context: none'}
 If moving, encourage exploring and noticing surroundings. If moving slowly, gently encourage continued movement.
 If stationary, do not claim movement; encourage a few steps when appropriate.
 Output exactly one short natural sentence. Do not output JSON, markdown, reasoning, or mention AI.`;

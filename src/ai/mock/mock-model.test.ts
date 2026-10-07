@@ -116,6 +116,71 @@ describe('MockModel walking cues', () => {
       response.cue,
     );
   });
+
+  it('replaces the ambient cue with a landmark cue naming the planned landmark', async () => {
+    const response = await model.generate({
+      task: 'walking-cue',
+      walkingState: {
+        ...walkingState,
+        landmarkAhead: { title: 'Open view', description: 'Look up and find the furthest thing you can see.' },
+      },
+    });
+    expect(response.cue).toBe('Open view is ahead — Look up and find the furthest thing you can see.');
+  });
+
+  it('yields an ambient cue once the landmark title is already in cue history', async () => {
+    const landmarkCue = 'Open view is ahead — Look up and find the furthest thing you can see.';
+    const response = await model.generate({
+      task: 'walking-cue',
+      walkingState: {
+        ...walkingState,
+        recentCueHistory: [landmarkCue],
+        landmarkAhead: { title: 'Open view', description: 'Look up and find the furthest thing you can see.' },
+      },
+    });
+    expect(response.cue).not.toContain('Open view');
+    expect(response.cue).not.toBe(landmarkCue);
+    expect(response.cue!.length).toBeLessThanOrEqual(160);
+  });
+
+  it('replaces the ambient cue with a mission cue', async () => {
+    const response = await model.generate({
+      task: 'walking-cue',
+      walkingState: { ...walkingState, mission: { prompt: 'Find a texture that surprises you.' } },
+    });
+    expect(response.cue).toBe('While you walk: Find a texture that surprises you.');
+  });
+
+  it('fires a mission cue only once: history containing the prompt yields ambient next', async () => {
+    const response = await model.generate({
+      task: 'walking-cue',
+      walkingState: {
+        ...walkingState,
+        recentCueHistory: ['While you walk: Find a texture that surprises you.'],
+        mission: { prompt: 'Find a texture that surprises you.' },
+      },
+    });
+    expect(response.cue).not.toContain('Find a texture that surprises you.');
+    expect(response.cue!.length).toBeLessThanOrEqual(160);
+  });
+
+  it('prefers the landmark cue over the mission cue when both are fresh', async () => {
+    const response = await model.generate({
+      task: 'walking-cue',
+      walkingState: {
+        ...walkingState,
+        landmarkAhead: { title: 'Open view', description: 'Look up.' },
+        mission: { prompt: 'Find a texture that surprises you.' },
+      },
+    });
+    expect(response.cue).toBe('Open view is ahead — Look up.');
+  });
+
+  it('falls back to the ambient pool when no landmark or mission context is present', async () => {
+    const response = await model.generate({ task: 'walking-cue', walkingState });
+    expect(response.cue).not.toContain('is ahead —');
+    expect(response.cue).not.toMatch(/^While you walk:/);
+  });
 });
 
 describe('MockModel lifecycle', () => {

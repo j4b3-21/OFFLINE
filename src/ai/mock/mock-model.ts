@@ -223,13 +223,26 @@ function buildLandmarks(route: Route, random: () => number): Landmark[] {
 }
 
 function walkingCue(state: WalkingState | undefined): string {
+  const history = state?.recentCueHistory ?? [];
+
+  // Plan-aware cues replace the ambient cue at this check. Each fires at most
+  // once per landmark/mission thanks to the dedupe history the monitor keeps.
+  const landmark = state?.landmarkAhead;
+  if (landmark && !history.some((entry) => entry.includes(landmark.title))) {
+    return `${landmark.title} is ahead — ${landmark.description}`;
+  }
+
+  const mission = state?.mission;
+  if (mission && !history.some((entry) => entry.includes(mission.prompt))) {
+    return `While you walk: ${mission.prompt}`;
+  }
+
   const pool =
     state?.movementState === 'stationary'
       ? STATIONARY_CUES
       : state?.movementState === 'slow'
         ? SLOW_CUES
         : MOVING_CUES;
-  const history = state?.recentCueHistory ?? [];
   const unused = pool.filter((cue) => !history.includes(cue));
   if (unused.length > 0) {
     return unused[Math.floor(mulberry32((state?.routeSeed ?? 1) + history.length)() * unused.length)];
