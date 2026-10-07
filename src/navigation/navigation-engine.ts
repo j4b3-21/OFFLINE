@@ -19,6 +19,22 @@ export type NavigationState = {
 const OFF_ROUTE_THRESHOLD_METERS = 45;
 const ARRIVAL_THRESHOLD_METERS = 35;
 
+/**
+ * The largest horizontal distance a single GPS sample may plausibly move in
+ * the monitoring loop before we treat it as a sensor jump rather than motion.
+ * Generous for walking; a real walker cannot cross this in one sample window.
+ */
+export const MAX_REASONABLE_JUMP_METERS = 250;
+
+/** Rejects implausible GPS jumps between consecutive samples (§ location accuracy). */
+export function isReasonableLocationSample(
+  previous: Location | undefined,
+  candidate: Location,
+): boolean {
+  if (!previous) return true;
+  return distanceBetween(previous, candidate) <= MAX_REASONABLE_JUMP_METERS;
+}
+
 export function createNavigationState(route: Route): NavigationState {
   return {
     status: 'NOT_STARTED',

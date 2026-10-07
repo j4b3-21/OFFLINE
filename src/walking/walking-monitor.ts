@@ -1,5 +1,5 @@
 import type { WalkingState } from '@/ai/local-model';
-import { distanceBetween } from '@/navigation/navigation-engine';
+import { distanceBetween, isReasonableLocationSample } from '@/navigation/navigation-engine';
 import type { Location } from '@/domain/experience';
 import { normalizeWalkingConfig, type WalkingConfig } from '@/walking/walking-config';
 import type { WalkingSessionDependencies, WalkingSnapshot } from '@/walking/walking-types';
@@ -103,7 +103,11 @@ export class WalkingMonitor {
       const current = await this.dependencies.getCurrentLocation();
       this.requireReliableLocation(current);
       const previous = this.snapshot.previousPosition ?? current;
-      const distanceMovedMeters = distanceBetween(previous, current);
+      // A single implausible sample is not movement: keep previous position so
+      // the check neither claims motion nor progresses the route on a jump.
+      const distanceMovedMeters = isReasonableLocationSample(previous, current)
+        ? distanceBetween(previous, current)
+        : 0;
       const elapsedSeconds = Math.max(1, (current.timestamp - previous.timestamp) / 1000);
       const movementState = movementStateFor(distanceMovedMeters, elapsedSeconds, this.config.minimumMovementMeters);
       const walkingState: WalkingState = {

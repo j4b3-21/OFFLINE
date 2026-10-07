@@ -1,5 +1,6 @@
 import * as Location from 'expo-location';
 
+import { isReasonableLocationSample } from '@/navigation/navigation-engine';
 import type { Location as UserLocation } from '@/domain/experience';
 
 export type PermissionState = 'granted' | 'denied' | 'undetermined';
@@ -36,13 +37,21 @@ export const deviceLocationProvider: LocationProvider = {
   },
 
   async watchLocation(callback, onError) {
+    // Drop implausible GPS jumps before they reach navigation or the walking
+    // monitor; a jumped sample would otherwise read as off-route or as motion.
+    let lastSample: UserLocation | undefined;
     const subscription = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.Balanced,
         distanceInterval: 10,
         timeInterval: 10_000,
       },
-      (location) => callback(toUserLocation(location)),
+      (location) => {
+        const sample = toUserLocation(location);
+        if (!isReasonableLocationSample(lastSample, sample)) return;
+        lastSample = sample;
+        callback(sample);
+      },
       (reason) => onError?.(new Error(reason)),
     );
     return () => subscription.remove();
