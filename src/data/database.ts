@@ -156,3 +156,53 @@ export async function getSessionEvents(sessionId: string): Promise<SessionEvent[
     createdAt: row.created_at,
   }));
 }
+
+/** All saved sessions, newest first. Feeds the archive screen. */
+export async function listSessions(): Promise<SessionRecord[]> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<{ session_json: string }>(
+    `SELECT session_json FROM sessions ORDER BY created_at DESC, id DESC`,
+  );
+  return rows.map((row) => JSON.parse(row.session_json) as SessionRecord);
+}
+
+/**
+ * Deletes a session, its events, its metrics row, and — only when no other
+ * session references it — the experience plan it was generated from.
+ */
+export async function deleteSession(sessionId: string): Promise<void> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<{ experience_id: string }>(
+    'SELECT experience_id FROM sessions WHERE id = ?',
+    sessionId,
+  );
+  await db.runAsync('DELETE FROM session_events WHERE session_id = ?', sessionId);
+  await db.runAsync('DELETE FROM session_metrics WHERE session_id = ?', sessionId);
+  await db.runAsync('DELETE FROM sessions WHERE id = ?', sessionId);
+  if (!row) return;
+  const remaining = await db.getFirstAsync<{ n: number }>(
+    'SELECT COUNT(*) AS n FROM sessions WHERE experience_id = ?',
+    row.experience_id,
+  );
+  if (!remaining || remaining.n === 0) {
+    await db.runAsync('DELETE FROM experiences WHERE id = ?', row.experience_id);
+  }
+}
+
+/**
+ * Exports a session as a denormalized JSON string — { session, experience?,
+ * events } — so the record survives even after its plan is deleted. This is
+ * the user-initiated local export surface (privacy: inspect / take-away).
+ */
+export async function exportSession(sessionId: string): Promise<string> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<{ session_json: string }>(
+    'SELECT session_json FROM sessions WHERE id = ?',
+    sessionId,
+  );
+  if (!row) throw new Error('Session not found.');
+  const session = JSON.parse(row.session_json) as SessionRecord;
+  const experience = await getExperience(session.experienceId);
+  const events = await getSessionEvents(sessionId);
+  return JSON.stringify({ session, experience, events }, null, 2);
+}
