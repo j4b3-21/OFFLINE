@@ -13,14 +13,16 @@ Everything the Mock planner produces is derived from real inputs:
 - route geometry is generated around the start location for a given duration and seed;
 - route distance, walking time, and turn instructions are computed from the generated coordinates (honest geometry, not claims);
 - landmarks are attention anchors ("Halfway point", "Quiet stretch") rather than surveyed environmental features;
-- missions come from a fixed physical-world pool (no phone-dependent tasks);
-- walking cues are short, deduplicated against recent cue history.
+- missions come from a fixed physical-world pool (no phone-dependent tasks), chosen by the walk mode (see plan variants in `docs/architecture/mvp.md`);
+- walking cues are short and deduplicated against recent cue history.
+
+**Plan-aware cue rules.** When the monitor passes a `landmarkAhead` whose title appears in no `recentCueHistory` entry, the cue becomes `"{title} is ahead — {description}"` instead of the ambient pool — once per landmark. Otherwise, when `mission` is present and its prompt appears in no history entry, the cue becomes `"While you walk: {prompt}"` — once per mission. Otherwise the existing movement-state ambient pool is used unchanged. Cue frequency and cadence are unaffected; the dedupe history guarantees each landmark/mission is referenced at most once. The context itself comes from `resolveCueContext` (`src/walking/cue-context.ts`): the nearest landmark within 400 m and the mission matching current route progress. Missing plan, navigation, or location degrades to ambient cues.
 
 ### TinyLlama (optional)
 
 The production-grade on-device model is TinyLlama 1.1B Chat, Q4_K_M GGUF, pinned to the repository commit in `src/config/integrations.ts`. The expected artifact is 668,788,096 bytes. `llama.rn` provides the thin native bridge to llama.cpp on iOS and Android. On first use, the app downloads the pinned artifact directly to its private document directory, validates the exact size, and atomically promotes it to the runtime path; the download dialog only appears when `provider = 'tinyllama'`. The model is never bundled into the native application and is not downloaded again after a successful setup. Expo Go is unsupported because it cannot load this project's custom native inference module; use `npx expo run:ios` or `npx expo run:android`.
 
-Known limitation of the TinyLlama path (not exercised by the default Mock planner): plan JSON can exceed the fixed 128-token budget, the adapter has no chat template/JSON grammar, and native init errors surface only in device logs. The Mock planner keeps the MVP end-to-end while these are addressed. Switching providers is `integrationConfig.ai.provider` in `src/config/integrations.ts`.
+Known limitation of the TinyLlama path (not exercised by the default Mock planner): plan JSON can exceed the fixed 128-token budget, the adapter has no chat template/JSON grammar, and native init errors surface only in device logs. The walking prompt (`src/ai/prompts.ts`) now carries the same optional landmark/mission context that the mock uses — so the real-model prompt stays aligned with the mock's deterministic rules — but the on-device TinyLlama engine is still **not** the active cue generator; `MockModel` implements these rules today. The Mock planner keeps the MVP end-to-end while these are addressed. Switching providers is `integrationConfig.ai.provider` in `src/config/integrations.ts`.
 
 ## Device voice
 
