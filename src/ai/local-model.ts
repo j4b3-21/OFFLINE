@@ -23,6 +23,9 @@ export type WalkingState = {
   movementState: MovementState;
   recentCueHistory: string[];
   routeSeed: number;
+  /** Optional plan context so the cue generator can reference the active walk. */
+  landmarkAhead?: { title: string; description: string };
+  mission?: { prompt: string };
 };
 export type ModelHealth = {
   status: 'unavailable' | 'loading' | 'ready' | 'error';

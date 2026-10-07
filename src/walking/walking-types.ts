@@ -1,6 +1,7 @@
 import type { LocalModel, MovementState } from '@/ai/local-model';
 import type { Location } from '@/domain/experience';
 import type { WalkingConfig } from '@/walking/walking-config';
+import type { PlanCueContext } from '@/walking/cue-context';
 
 export type WalkingSessionStatus = 'IDLE' | 'STARTING' | 'WALKING' | 'CHECKING' | 'SPEAKING' | 'PAUSED' | 'STOPPED' | 'ERROR';
 
@@ -27,4 +28,10 @@ export type WalkingSessionDependencies = {
   subscribeToLocation: (callback: (location: Location) => void, onError?: (error: Error) => void) => Promise<() => void>;
   config: WalkingConfig;
   routeSeed: number;
+  /**
+   * Plan-aware cue context for each check. Optional because the host screen
+   * wires it during the integration pass; monitors call it defensively and
+   * fall back to ambient cues when absent.
+   */
+  cueContext?: () => PlanCueContext;
 };
