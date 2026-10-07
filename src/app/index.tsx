@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { router } from 'expo-router';
 
 import { ExperienceEngine } from '@/experience/experience-engine';
 import {
@@ -32,7 +33,7 @@ import {
   transitionSession,
 } from '@/session/session-engine';
 import { buildSessionStory } from '@/session/session-story';
-import type { ExperiencePlan, Location, SessionEvent, SessionRecord, SessionReport } from '@/domain/experience';
+import type { ExperiencePlan, Location, SessionEvent, SessionRecord, SessionReport, WalkMode } from '@/domain/experience';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -53,12 +54,26 @@ import { QueuedVoiceProvider } from '@/voice/voice-queue';
 import { DEFAULT_WALKING_CONFIG, WALKING_INTERVAL_OPTIONS, type WalkingConfig } from '@/walking/walking-config';
 import { WalkingMonitor } from '@/walking/walking-monitor';
 import type { WalkingSnapshot } from '@/walking/walking-types';
+import {
+  resolveCueContext,
+  type PlanCueContext,
+} from '@/walking/cue-context';
 
 const engine = new ExperienceEngine(activeModel);
+
+// One small mode toggle at Prepare; the labels are the whole interface.
+const WALK_MODE_OPTIONS: readonly { value: WalkMode; label: string }[] = [
+  { value: 'quiet', label: 'Quiet' },
+  { value: 'curious', label: 'Curious' },
+  { value: 'explore', label: 'Explore new area' },
+];
 
 export default function HomeScreen() {
   const theme = useTheme();
   const [duration, setDuration] = useState('30');
+  // Prepare-mode variant: quiet / curious / explore. 'quiet' is the default and
+  // the planner also defaults to it, so an unset mode can never invent one.
+  const [walkMode, setWalkMode] = useState<WalkMode>('quiet');
   const [plan, setPlan] = useState<ExperiencePlan>();
   const [session, setSession] = useState<SessionRecord>();
   const [loading, setLoading] = useState(false);
@@ -96,6 +111,18 @@ export default function HomeScreen() {
   // Guidance + event logging react to navigation transitions, not to every GPS point.
   const navigationStatusRef = useRef<string | undefined>(undefined);
   const navigationSegmentRef = useRef(-1);
+
+  // The walking guide re-resolves plan context on EVERY check from the freshest
+  // screen state (plan, navigation, location) rather than the values captured
+  // when the guide started. The function the monitor holds stays stable while
+  // each call reads current state through the ref, so landmark/mission cues
+  // follow the walker instead of freezing at guide start. The ref is refreshed
+  // in an effect (never during render); monitor checks run on timers, long
+  // after any effect has flushed, so they always see the latest context.
+  const cueContextRef = useRef<() => PlanCueContext>(() => resolveCueContext(undefined, undefined, undefined));
+  useEffect(() => {
+    cueContextRef.current = () => resolveCueContext(plan, navigation, location);
+  });
 
   useEffect(() => {
     initializeDatabase()
@@ -219,15 +246,15 @@ export default function HomeScreen() {
     };
   }, [session, reportReady]);
 
-  // One mission at a time during the walk, advanced by route progress so the
-  // active screen stays minimal and needs no interaction to track.
-  const currentMission = (() => {
-    if (!plan || session?.status !== 'ACTIVE') return undefined;
-    const segments = Math.max(1, plan.route.points.length - 1);
-    const progress = Math.min(1, (navigation?.currentSegmentIndex ?? 0) / segments);
-    const index = Math.min(plan.missions.length - 1, Math.floor(progress * plan.missions.length));
-    return plan.missions[Math.max(0, index)];
-  })();
+  // One mission at a time during the walk, advanced by the same cue-context
+  // resolver the walking monitor uses — a single source of truth for the
+  // active mission, no duplicated bracket math. Resolves to no mission when
+  // plan, navigation, or location is missing (honest degradation), and the
+  // ACTIVE gate keeps the mission off the screen outside a live walk.
+  const currentMission =
+    plan && session?.status === 'ACTIVE'
+      ? resolveCueContext(plan, navigation, location).mission
+      : undefined;
 
   function toggleMission(missionId: string) {
     if (!session || session.status !== 'COMPLETED') return;
@@ -282,7 +309,15 @@ export default function HomeScreen() {
       } catch {
         setLocationMessage('Location is unavailable. Using a cached route template.');
       }
-      const nextPlan = await engine.create(minutes, planningLocation);
+      // The hour is fixed at generation time so the plan variant (e.g. the
+      // evening light mission) never depends on the wall clock at cue time.
+      const nextPlan = await engine.create(
+        minutes,
+        planningLocation,
+        undefined,
+        walkMode,
+        new Date().getHours(),
+      );
       const safety = safetyEngine.validateExperience(nextPlan);
       if (!safety.safe) throw new Error(safety.reasons.join(' '));
       await saveExperience(nextPlan);
@@ -337,6 +372,7 @@ export default function HomeScreen() {
       subscribeToLocation: deviceLocationProvider.watchLocation,
       config: walkingConfig,
       routeSeed: plan.routeSeed ?? 0,
+      cueContext: () => cueContextRef.current(),
     });
     monitor.subscribe((snapshot) => {
       setWalkingSnapshot(snapshot);
@@ -470,6 +506,23 @@ export default function HomeScreen() {
                   value={duration}
                 />
                 <ThemedText>minutes</ThemedText>
+              </View>
+              <View style={styles.modeRow}>
+                {WALK_MODE_OPTIONS.map((option) => {
+                  const selected = walkMode === option.value;
+                  return (
+                    <Pressable
+                      key={option.value}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      onPress={() => setWalkMode(option.value)}
+                      style={[styles.modeButton, selected && styles.modeButtonSelected]}>
+                      <ThemedText type="small" themeColor={selected ? 'text' : 'textSecondary'}>
+                        {option.label}
+                      </ThemedText>
+                    </Pressable>
+                  );
+                })}
               </View>
               <PrimaryButton
                 disabled={!databaseReady || loading}
@@ -617,6 +670,14 @@ export default function HomeScreen() {
                   setSession(undefined);
                 }}
               />
+              <Pressable
+                accessibilityRole="link"
+                onPress={() => router.push('/archive')}
+                style={styles.pastWalksLink}>
+                <ThemedText type="small" themeColor="textSecondary">
+                  Past walks
+                </ThemedText>
+              </Pressable>
             </ThemedView>
           )}
         </ScrollView>
@@ -792,6 +853,9 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.two,
     width: 110,
   },
+  modeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.one },
+  modeButton: { borderColor: '#aeb8b0', borderRadius: 10, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 7 },
+  modeButtonSelected: { backgroundColor: '#d7eadf', borderColor: '#1e6b52' },
   button: {
     alignItems: 'center',
     backgroundColor: '#1e6b52',
@@ -824,4 +888,5 @@ const styles = StyleSheet.create({
   progressTrack: { height: 8, width: '100%', overflow: 'hidden', borderRadius: 999, backgroundColor: '#d6ddd8' },
   progressFill: { height: '100%', borderRadius: 999, backgroundColor: '#1e6b52' },
   cancelButton: { alignItems: 'center', paddingVertical: Spacing.one },
+  pastWalksLink: { alignItems: 'center', paddingVertical: Spacing.one },
 });

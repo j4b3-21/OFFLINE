@@ -29,9 +29,9 @@ export type WalkingSessionDependencies = {
   config: WalkingConfig;
   routeSeed: number;
   /**
-   * Plan-aware cue context for each check. Optional because the host screen
-   * wires it during the integration pass; monitors call it defensively and
-   * fall back to ambient cues when absent.
+   * Plan-aware cue context for each check. The host screen always supplies it;
+   * a walk with no plan, navigation, or location resolves to an empty context
+   * so cues fall back to ambient and never claim plan knowledge.
    */
-  cueContext?: () => PlanCueContext;
+  cueContext: () => PlanCueContext;
 };

@@ -110,7 +110,7 @@ export class WalkingMonitor {
         : 0;
       const elapsedSeconds = Math.max(1, (current.timestamp - previous.timestamp) / 1000);
       const movementState = movementStateFor(distanceMovedMeters, elapsedSeconds, this.config.minimumMovementMeters);
-      const cueContext = this.dependencies.cueContext?.() ?? {};
+      const cueContext = this.dependencies.cueContext();
       const walkingState: WalkingState = {
         currentLocation: current,
         previousLocation: previous,
