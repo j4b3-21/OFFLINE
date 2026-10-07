@@ -1,23 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ExperiencePlan, SessionRecord } from '@/domain/experience';
+import * as database from '@/data/database';
 
 // A minimal in-memory double for the Expo SQLite driver so the repository
 // layer (SQL strings, parameter binding, migration statements) is testable
-// in a plain Node environment.
+// in a plain Node environment. vi.mock is hoisted above the imports.
 const fake = vi.hoisted(() => {
   const state = {
     execLog: [] as string[],
-    runLog: [] as Array<{ sql: string; params: unknown[] }>,
+    runLog: [] as { sql: string; params: unknown[] }[],
     planRow: undefined as { plan_json: string } | undefined,
     sessionRow: undefined as { session_json: string } | undefined,
-    eventRows: [] as Array<{
+    eventRows: [] as {
       id: number;
       session_id: string;
       type: string;
       detail: string | null;
       created_at: string;
-    }>,
+    }[],
   };
   const db = {
     execAsync: vi.fn(async (sql: string) => {
@@ -43,8 +44,6 @@ const fake = vi.hoisted(() => {
 vi.mock('expo-sqlite', () => ({
   openDatabaseAsync: async () => fake.db,
 }));
-
-import * as database from '@/data/database';
 
 const plan: ExperiencePlan = {
   id: 'exp-1',

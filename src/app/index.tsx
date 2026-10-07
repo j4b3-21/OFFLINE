@@ -82,6 +82,9 @@ export default function HomeScreen() {
   const pausedMsRef = useRef(0);
   const pauseStartRef = useRef<number | undefined>(undefined);
   const [notedMissionIds, setNotedMissionIds] = useState<string[]>([]);
+  // Mirrors whether the live GPS guide (WalkingMonitor) is running, in state so
+  // the render can branch without reading a ref.
+  const [guideActive, setGuideActive] = useState(false);
 
   // Guidance + event logging react to navigation transitions, not to every GPS point.
   const navigationStatusRef = useRef<string | undefined>(undefined);
@@ -277,48 +280,58 @@ export default function HomeScreen() {
     }
   }
 
+  async function startWalkingGuide(): Promise<boolean> {
+    if (!plan) return false;
+    const permission = await deviceLocationProvider.requestPermission();
+    if (permission !== 'granted') {
+      setLocationMessage('Location permission was not granted. Continuing with the saved route.');
+      await audioGuidance.speak('Location is unavailable. Follow the saved route and put your phone away.');
+      return false;
+    }
+    const provider = new SystemVoiceProvider({
+      ...integrationConfig.voice,
+      enabled: walkingConfig.voiceEnabled,
+    });
+    const queuedVoice = new QueuedVoiceProvider(provider);
+    const monitor = new WalkingMonitor({
+      model: activeModel,
+      voice: queuedVoice,
+      voiceProvider: 'system',
+      getCurrentLocation: () => deviceLocationProvider.getCurrentLocation(),
+      subscribeToLocation: deviceLocationProvider.watchLocation,
+      config: walkingConfig,
+      routeSeed: plan.routeSeed ?? 0,
+    });
+    monitor.subscribe((snapshot) => {
+      setWalkingSnapshot(snapshot);
+      if (snapshot.currentPosition) {
+        setLocation(snapshot.currentPosition);
+        setNavigation((previous) =>
+          previous ? updateNavigationState(plan.route, snapshot.currentPosition!, previous) : previous,
+        );
+      }
+    });
+    walkingMonitorRef.current = monitor;
+    await monitor.start();
+    setGuideActive(true);
+    setLocationMessage('Location active. Keep the phone down; cues are occasional.');
+    return true;
+  }
+
+  async function stopWalkingGuide() {
+    const monitor = walkingMonitorRef.current;
+    if (monitor) {
+      await monitor.stop();
+      walkingMonitorRef.current = undefined;
+    }
+    setGuideActive(false);
+  }
+
   async function startExperience() {
     if (!plan || !session) return;
     if (walkingMonitorRef.current) return;
-    let permission = 'undetermined';
     try {
-      permission = await deviceLocationProvider.requestPermission();
-      if (permission !== 'granted') {
-        setLocationMessage('Location permission was not granted. Continuing with the saved route.');
-        const started = transitionSession(session, 'STARTED');
-        const active = transitionSession(started, 'ACTIVE');
-        await saveSession(active);
-        setSession(active);
-        void recordSessionEvent(active.id, 'SESSION_STARTED').catch(() => undefined);
-        await audioGuidance.speak('Location is unavailable. Follow the saved route and put your phone away.');
-        return;
-      }
-      const provider = new SystemVoiceProvider({
-        ...integrationConfig.voice,
-        enabled: walkingConfig.voiceEnabled,
-      });
-      const queuedVoice = new QueuedVoiceProvider(provider);
-      const monitor = new WalkingMonitor({
-        model: activeModel,
-        voice: queuedVoice,
-        voiceProvider: 'system',
-        getCurrentLocation: () => deviceLocationProvider.getCurrentLocation(),
-        subscribeToLocation: deviceLocationProvider.watchLocation,
-        config: walkingConfig,
-        routeSeed: plan.routeSeed ?? 0,
-      });
-      monitor.subscribe((snapshot) => {
-        setWalkingSnapshot(snapshot);
-        if (snapshot.currentPosition) {
-          setLocation(snapshot.currentPosition);
-          setNavigation((previous) =>
-            previous ? updateNavigationState(plan.route, snapshot.currentPosition!, previous) : previous,
-          );
-        }
-      });
-      walkingMonitorRef.current = monitor;
-      await monitor.start();
-      setLocationMessage('Location active. Keep the phone down; cues are occasional.');
+      await startWalkingGuide();
       const started = transitionSession(session, 'STARTED');
       const active = transitionSession(started, 'ACTIVE');
       await saveSession(active);
@@ -326,17 +339,27 @@ export default function HomeScreen() {
       void recordSessionEvent(active.id, 'SESSION_STARTED').catch(() => undefined);
       await signalGuidance('continue');
     } catch (error) {
-      await walkingMonitorRef.current?.stop();
-      walkingMonitorRef.current = undefined;
+      await stopWalkingGuide();
       setLocationMessage(error instanceof Error ? error.message : 'Location is unavailable.');
       await audioGuidance.speak('Location is unavailable. Follow the saved route and put your phone away.');
     }
   }
 
+  // Reconnects the guide for a recovered ACTIVE session without re-running the
+  // session state machine (status is already ACTIVE).
+  async function resumeGuide() {
+    if (!plan || !session || session.status !== 'ACTIVE') return;
+    try {
+      await startWalkingGuide();
+    } catch (error) {
+      await stopWalkingGuide();
+      setLocationMessage(error instanceof Error ? error.message : 'Location is unavailable.');
+    }
+  }
+
   async function completeExperience() {
     if (!plan || !session) return;
-    await walkingMonitorRef.current?.stop();
-    walkingMonitorRef.current = undefined;
+    await stopWalkingGuide();
     // Flush open measurement windows before snapshotting the metrics.
     if (foregroundSinceRef.current !== undefined) {
       screenForegroundMsRef.current += Date.now() - foregroundSinceRef.current;
@@ -457,10 +480,14 @@ export default function HomeScreen() {
                   </Pressable>
                 ))}
               </View>
-              {walkingSnapshot?.status === 'PAUSED' ? (
-                <PrimaryButton label="Resume walking" onPress={() => walkingMonitorRef.current?.resume()} />
+              {guideActive ? (
+                walkingSnapshot?.status === 'PAUSED' ? (
+                  <PrimaryButton label="Resume walking" onPress={() => walkingMonitorRef.current?.resume()} />
+                ) : (
+                  <PrimaryButton label="Pause walking" onPress={() => walkingMonitorRef.current?.pause()} />
+                )
               ) : (
-                <PrimaryButton label="Pause walking" onPress={() => walkingMonitorRef.current?.pause()} />
+                <PrimaryButton label="Reconnect GPS guide" onPress={resumeGuide} />
               )}
               {navigation?.nextInstruction && navigation.status !== 'COMPLETED' && (
                 <ThemedText style={styles.nextInstruction}>
