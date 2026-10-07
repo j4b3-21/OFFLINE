@@ -16,6 +16,7 @@ import { ExperienceEngine } from '@/experience/experience-engine';
 import {
   getExperience,
   getLatestOpenSession,
+  getSessionEvents,
   initializeDatabase,
   recordSessionEvent,
   saveExperience,
@@ -30,7 +31,8 @@ import {
   createSessionReport,
   transitionSession,
 } from '@/session/session-engine';
-import type { ExperiencePlan, Location, SessionRecord } from '@/domain/experience';
+import { buildSessionStory } from '@/session/session-story';
+import type { ExperiencePlan, Location, SessionEvent, SessionRecord, SessionReport } from '@/domain/experience';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -71,6 +73,11 @@ export default function HomeScreen() {
   const [downloadProgress, setDownloadProgress] = useState<ModelDownloadProgress>();
   const [downloadLoading, setDownloadLoading] = useState(false);
   const downloadCancelledRef = useRef(false);
+  const [sessionEvents, setSessionEvents] = useState<SessionEvent[]>([]);
+  // The debrief needs stored session events; loaded once when the session completes.
+  const [reportReady, setReportReady] = useState(false);
+  // Raw DIS/PES/ADR scores sit behind a toggle once the story is rendered.
+  const [showMetrics, setShowMetrics] = useState(false);
 
   // Honest, app-local session metrics. Everything here is measured inside
   // OFFLINE itself: foreground time while the session is ACTIVE, returns to
@@ -182,6 +189,35 @@ export default function HomeScreen() {
     () => (plan && session?.status === 'COMPLETED' ? createSessionReport(session, plan) : undefined),
     [plan, session],
   );
+
+  const story = useMemo(
+    () =>
+      report && plan && reportReady
+        ? buildSessionStory(report, plan, sessionEvents, notedMissionIds)
+        : undefined,
+    [report, plan, reportReady, sessionEvents, notedMissionIds],
+  );
+
+  // The walk section of the debrief needs the session's stored events
+  // (off-route / recovery). Missions and phone sections come from live state,
+  // so mission toggles stay reflected even after this one-time load.
+  useEffect(() => {
+    if (!session || session.status !== 'COMPLETED' || reportReady) return;
+    let cancelled = false;
+    void getSessionEvents(session.id)
+      .then((events) => {
+        if (!cancelled) {
+          setSessionEvents(events);
+          // Only present when the data actually loaded: an unreadable event
+          // log must never be reported as "you stayed on route."
+          setReportReady(true);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [session, reportReady]);
 
   // One mission at a time during the walk, advanced by route progress so the
   // active screen stays minimal and needs no interaction to track.
@@ -395,6 +431,14 @@ export default function HomeScreen() {
     await signalGuidance('attention');
   }
 
+  // One-tap audible debrief for when the phone comes back out after the walk.
+  // Reuses the same guidance voice path; only the opening is a sound cue.
+  function speakDebrief() {
+    if (!story) return;
+    const text = `${story.opening} ${story.sections.map((section) => section.text).join(' ')}`;
+    void audioGuidance.speak(text);
+  }
+
   return (
     <ThemedView style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
@@ -507,19 +551,22 @@ export default function HomeScreen() {
             <ThemedView type="backgroundElement" style={styles.card}>
               <ThemedText type="subtitle">Welcome back.</ThemedText>
               <ThemedText style={styles.body}>You did not need the AI for most of the walk.</ThemedText>
-              <Metric label="Outdoor time" value={`${report.durationMinutes} min`} />
-              <Metric label="Uninterrupted time" value={`${report.uninterruptedMinutes} min`} />
-              <Metric
-                label="Route completed"
-                value={report.routeCompleted ? 'Yes' : 'Not quite'}
-              />
-              <Metric
-                label="Missions noticed"
-                value={`${report.missionCompletions} / ${plan.missions.length}`}
-              />
-              <Metric label="Digital intrusion score" value={`${report.digitalIntrusionScore}`} />
-              <Metric label="Physical engagement score" value={`${report.physicalEngagementScore}`} />
-              <Metric label="AI disappearance rate" value={`${Math.round(report.aiDisappearanceRate * 100)}%`} />
+              {story && (
+                <>
+                  <ThemedText style={styles.routeSummary}>{story.opening}</ThemedText>
+                  {story.sections.map((section) => (
+                    <View key={section.heading} style={styles.storySection}>
+                      <ThemedText type="smallBold" themeColor="textSecondary">
+                        {section.heading}
+                      </ThemedText>
+                      <ThemedText style={styles.body}>{section.text}</ThemedText>
+                    </View>
+                  ))}
+                  <ThemedText type="small" themeColor="textSecondary">
+                    Every line above is derived from your walk — nothing invented.
+                  </ThemedText>
+                </>
+              )}
               {plan.missions.length > 0 && (
                 <>
                   <ThemedText type="smallBold" style={styles.sectionLabel}>
@@ -543,10 +590,26 @@ export default function HomeScreen() {
                   })}
                 </>
               )}
-              <ThemedText type="small" themeColor="textSecondary">
-                Scores are OFFLINE-defined experimental metrics. Screen values are app-local proxies
-                measured during this session; unlock counts are not available on this platform.
-              </ThemedText>
+              {story ? (
+                <>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => setShowMetrics((visible) => !visible)}
+                    style={styles.metricToggle}>
+                    <ThemedText type="smallBold" themeColor="textSecondary">
+                      {showMetrics ? 'Hide' : 'Show'} how this is measured
+                    </ThemedText>
+                  </Pressable>
+                  {showMetrics && (
+                    <MetricRows report={report} plan={plan} />
+                  )}
+                </>
+              ) : (
+                <MetricRows report={report} plan={plan} />
+              )}
+              {story && integrationConfig.voice.enabled && (
+                <PrimaryButton label="Read my debrief" onPress={speakDebrief} />
+              )}
               <PrimaryButton
                 label="Plan another quiet walk"
                 onPress={() => {
@@ -663,6 +726,27 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function MetricRows({ report, plan }: { report: SessionReport; plan: ExperiencePlan }) {
+  return (
+    <>
+      <Metric label="Outdoor time" value={`${report.durationMinutes} min`} />
+      <Metric label="Uninterrupted time" value={`${report.uninterruptedMinutes} min`} />
+      <Metric label="Route completed" value={report.routeCompleted ? 'Yes' : 'Not quite'} />
+      <Metric
+        label="Missions noticed"
+        value={`${report.missionCompletions} / ${plan.missions.length}`}
+      />
+      <Metric label="Digital intrusion score" value={`${report.digitalIntrusionScore}`} />
+      <Metric label="Physical engagement score" value={`${report.physicalEngagementScore}`} />
+      <Metric label="AI disappearance rate" value={`${Math.round(report.aiDisappearanceRate * 100)}%`} />
+      <ThemedText type="small" themeColor="textSecondary">
+        Scores are OFFLINE-defined experimental metrics. Screen values are app-local proxies
+        measured during this session; unlock counts are not available on this platform.
+      </ThemedText>
+    </>
+  );
+}
+
 function PrimaryButton({
   label,
   onPress,
@@ -724,6 +808,8 @@ const styles = StyleSheet.create({
   nextInstruction: { fontSize: 19, lineHeight: 28, fontWeight: '700' },
   landmark: { borderLeftColor: '#d47c46', borderLeftWidth: 3, gap: 2, paddingLeft: Spacing.two },
   sectionLabel: { marginTop: Spacing.two },
+  storySection: { gap: 2 },
+  metricToggle: { marginTop: Spacing.two, paddingVertical: Spacing.two },
   missionRow: { paddingVertical: Spacing.one },
   mission: { flexDirection: 'row', gap: Spacing.two, alignItems: 'flex-start' },
   missionDot: { color: '#1e6b52', fontSize: 20, lineHeight: 24 },
