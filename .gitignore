@@ -31,6 +31,9 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
+.env.*
+!.env.example
 .env*.local
 
 # typescript
@@ -41,3 +44,7 @@ example
 # generated native folders
 /ios
 /android
+.idea
+.vscode
+# Model weights are downloaded by the app on the device, never committed or bundled.
+assets/models/tinyllama/
