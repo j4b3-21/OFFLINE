@@ -1,4 +1,4 @@
-import type { Location } from '@/domain/experience';
+import type { Location, WalkMode } from '@/domain/experience';
 import { integrationConfig, type ModelConfig } from '@/config/integrations';
 import { TinyLlamaEngine } from '@/ai/tinyllama/tinyllama-engine';
 import { walkingPrompt, experiencePrompt } from '@/ai/prompts';
@@ -10,6 +10,9 @@ export type ModelRequest = {
   startLocation?: Pick<Location, 'latitude' | 'longitude'>;
   walkingState?: WalkingState;
   routeSeed?: number;
+  /** Optional plan-variant inputs; the planner defaults when absent. */
+  walkMode?: WalkMode;
+  hourOfDay?: number;
 };
 
 export type ModelMetadata = { id: string; displayName: string; local: boolean };

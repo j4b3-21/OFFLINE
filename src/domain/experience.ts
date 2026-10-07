@@ -69,6 +69,8 @@ export type AttentionBudget = {
   maxMusicInterruptions?: number;
 };
 
+export type WalkMode = 'quiet' | 'curious' | 'explore';
+
 export type RoutePreferences = {
   targetDurationMinutes: number;
   greeneryWeight: number;
@@ -76,6 +78,9 @@ export type RoutePreferences = {
   quietnessWeight: number;
   simplicityWeight: number;
   explorationWeight: number;
+  /** Optional plan-variant inputs recorded on the plan (schema stays experience.schema.v1). */
+  mode?: WalkMode;
+  hourOfDay?: number;
 };
 
 export type ExperienceCue = {

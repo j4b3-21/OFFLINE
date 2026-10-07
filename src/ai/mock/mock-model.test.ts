@@ -183,6 +183,47 @@ describe('MockModel walking cues', () => {
   });
 });
 
+describe('MockModel plan variants', () => {
+  it('defaults to the quiet mode with the default AI budget when mode is absent', async () => {
+    const plan = await planFor(31, 30);
+    expect(plan.routePreferences?.mode).toBe('quiet');
+    expect(plan.routePreferences?.hourOfDay).toBe(12);
+    expect(plan.attentionBudget.maxAIInteractions).toBe(3);
+    const quietPoolIds = new Set(['m-no-phone', 'm-look-up', 'm-texture']);
+    expect(plan.missions.every((mission) => quietPoolIds.has(mission.id))).toBe(true);
+  });
+
+  it('uses the requested explore variant: pool, budget, and recorded inputs', async () => {
+    const response = await model.generate({
+      task: 'experience-plan',
+      durationMinutes: 30,
+      routeSeed: 31,
+      walkMode: 'explore',
+      hourOfDay: 12,
+    });
+    const plan = validateExperiencePlan(response.plan);
+    expect(plan.routePreferences?.mode).toBe('explore');
+    expect(plan.routePreferences?.hourOfDay).toBe(12);
+    expect(plan.attentionBudget.maxAIInteractions).toBe(4);
+    const explorePoolIds = new Set(['m-furthest-thing', 'm-water', 'm-moving-thing']);
+    expect(plan.missions.every((mission) => explorePoolIds.has(mission.id))).toBe(true);
+  });
+
+  it('draws only from the evening-expanded pool near nightfall', async () => {
+    const response = await model.generate({
+      task: 'experience-plan',
+      durationMinutes: 30,
+      routeSeed: 32,
+      walkMode: 'quiet',
+      hourOfDay: 20,
+    });
+    const plan = validateExperiencePlan(response.plan);
+    expect(plan.routePreferences?.hourOfDay).toBe(20);
+    const quietEveningPoolIds = new Set(['m-no-phone', 'm-look-up', 'm-texture', 'm-light']);
+    expect(plan.missions.every((mission) => quietEveningPoolIds.has(mission.id))).toBe(true);
+  });
+});
+
 describe('MockModel lifecycle', () => {
   it('reports health and metadata like any other LocalModel', async () => {
     expect(model.isLoaded()).toBe(false);

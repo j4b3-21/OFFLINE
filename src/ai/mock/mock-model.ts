@@ -11,10 +11,10 @@ import {
   type Coordinate,
   type ExperiencePlan,
   type Landmark,
-  type Mission,
   type Route,
 } from '@/domain/experience';
 import { distanceBetween } from '@/navigation/navigation-engine';
+import { resolvePlanVariant } from '@/experience/plan-variants';
 
 /**
  * MockModel is the deterministic, fully offline planner used for development,
@@ -29,19 +29,6 @@ import { distanceBetween } from '@/navigation/navigation-engine';
  */
 
 const WALKING_SPEED_M_PER_MIN = 75; // ≈ 4.5 km/h
-
-const MISSION_POOL: Mission[] = [
-  { id: 'm-leaf-shapes', prompt: 'Find three different leaf shapes.', estimatedMinutes: 5 },
-  { id: 'm-three-sounds', prompt: 'Listen for three different sounds.', estimatedMinutes: 4 },
-  { id: 'm-older-than-you', prompt: 'Find something older than you.', estimatedMinutes: 5 },
-  { id: 'm-no-phone', prompt: 'Walk for five minutes without looking at your phone.', estimatedMinutes: 5 },
-  { id: 'm-water', prompt: 'Find a place where you can hear water.', estimatedMinutes: 6 },
-  { id: 'm-moving-thing', prompt: 'Notice something moving that is not a person.', estimatedMinutes: 4 },
-  { id: 'm-brightest-colour', prompt: 'Find the brightest colour around you.', estimatedMinutes: 3 },
-  { id: 'm-look-up', prompt: 'Stop and look up for thirty seconds.', estimatedMinutes: 2 },
-  { id: 'm-texture', prompt: 'Find a texture that surprises you.', estimatedMinutes: 4 },
-  { id: 'm-furthest-thing', prompt: 'Notice the furthest thing you can see.', estimatedMinutes: 3 },
-];
 
 const LANDMARK_ANCHORS: (Pick<Landmark, 'title' | 'description'>)[] = [
   { title: 'First pause', description: 'Stop here and notice three sounds before continuing.' },
@@ -117,9 +104,16 @@ function buildPlan(request: ModelRequest): ExperiencePlan {
   const start: Coordinate = request.startLocation ?? { latitude: 0, longitude: 0 };
   const random = mulberry32(routeSeed);
 
-  const route = buildRoute(routeSeed, durationMinutes, start);
+  // Deterministic plan variants: 'quiet' is the default mode and the hour
+  // defaults to midday, so absent inputs never make a plan depend on the
+  // wall clock or the caller remembering to pass the mode.
+  const mode = request.walkMode ?? 'quiet';
+  const hourOfDay = request.hourOfDay ?? 12;
+  const variant = resolvePlanVariant(mode, hourOfDay);
+
+  const route = buildRoute(routeSeed, durationMinutes, start, variant.routeJitter);
   const missionCount = clamp(Math.round(durationMinutes / 10), 3, 5);
-  const missions = pickSeeded(MISSION_POOL, missionCount, random);
+  const missions = pickSeeded(variant.missionPool, missionCount, random);
 
   return {
     id: `exp-${routeSeed}`,
@@ -131,7 +125,7 @@ function buildPlan(request: ModelRequest): ExperiencePlan {
     attentionBudget: {
       maxScreenInteractions: 5,
       maxScreenSeconds: 90,
-      maxAIInteractions: 3,
+      maxAIInteractions: variant.maxAIInteractions,
     },
     safety: {
       avoidRoadCrossings: true,
@@ -147,6 +141,8 @@ function buildPlan(request: ModelRequest): ExperiencePlan {
       quietnessWeight: 0.25,
       simplicityWeight: 0.15,
       explorationWeight: 0.15,
+      mode,
+      hourOfDay,
     },
     routeSeed,
     provenance: {
@@ -157,7 +153,7 @@ function buildPlan(request: ModelRequest): ExperiencePlan {
   };
 }
 
-function buildRoute(routeSeed: number, durationMinutes: number, start: Coordinate): Route {
+function buildRoute(routeSeed: number, durationMinutes: number, start: Coordinate, routeJitter: number): Route {
   const random = mulberry32(routeSeed ^ 0x5f3759df);
   const targetMeters = durationMinutes * WALKING_SPEED_M_PER_MIN;
   const segmentCount = clamp(Math.round(durationMinutes / 6), 4, 10);
@@ -168,7 +164,10 @@ function buildRoute(routeSeed: number, durationMinutes: number, start: Coordinat
   const points: Coordinate[] = [];
   for (let index = 0; index < segmentCount; index += 1) {
     const angle = (index / segmentCount) * 2 * Math.PI;
-    const jitter = 1 + (random() - 0.5) * 0.3;
+    // The jitter multiplier is the previous hardcoded amplitude: 'curious' (0.3)
+    // keeps the historical geometry, while 'quiet' (0.15) and 'explore' (0.45)
+    // make the loop calmer or looser around the same radius.
+    const jitter = 1 + (random() - 0.5) * routeJitter;
     const radius = radiusMeters * jitter;
     points.push({
       latitude: start.latitude + (radius * Math.cos(angle)) / latitudeMeters,
