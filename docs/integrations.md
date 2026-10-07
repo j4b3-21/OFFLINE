@@ -33,3 +33,11 @@ Spotify remains an independent optional handoff through its URI scheme. OFFLINE 
 ## Limitations
 
 Physical-device benchmarks are required before making claims about latency, RAM, or battery of the TinyLlama path. The web build intentionally reports that the native model is unavailable and renders an explicit cached-route preview instead of live tiles. The model is small and is intended for short walking cues, not general reasoning or safety-critical decisions.
+
+## Development build status
+
+- **Dev build works.** The app runs as an iOS development build on the simulator (iPhone 17 Pro, iOS 26.1, Xcode 27.0, SDK 57). `expo-dev-client` (~57.0.19) is required because the `llama.rn` native module cannot load in Expo Go.
+- **Reproduce:** `npx expo install expo-dev-client` → `npx expo prebuild --clean` → `npx expo run:ios` (device variant: `npx expo run:ios --device`). Simulator steps, environment versions, and the manual on-device checklist are recorded in `docs/device-verification.md`.
+- **Android:** not buildable on this machine (Android SDK not installed); `npx expo run:android` once the SDK is present.
+- **Physical device (BLOCKED, human-in-the-loop):** real GPS, device TTS, and haptics have not yet been verified on hardware. See the checklist in `docs/device-verification.md` — items marked 🔒 (phone away, cues/haptics, return) require a physical iPhone.
+- **TinyLlama provider:** the pinned GGUF is downloaded to the app's private document directory on first use (exact-size validated); it is not bundled into the native build. Tested end-to-end only as far as the download flow; on-device inference latency/RAM/battery remains unbenchmarked.
