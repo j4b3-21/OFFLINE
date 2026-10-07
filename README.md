@@ -1,56 +1,63 @@
-# Welcome to your Expo app 👋
+# OFFLINE
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+OFFLINE is an offline-first AI walking companion: it prepares a short route locally, gives occasional spoken cues, and then gets out of the way.
 
-## Get started
+> An AI whose success is measured by how little you need it.
 
-1. Install dependencies
+## What works today (MVP)
 
-   ```bash
-   npm install
-   ```
+The full pre-walk → walk → report loop runs on a device:
 
-2. Start the app
+1. Enter how much time you have.
+2. OFFLINE plans a quiet loop near your location (route, landmarks, missions, attention budget) using the **Mock planner** — a deterministic, fully offline planner built on real inputs (duration, seed, start location) with honest geometry.
+3. Review the route on the map, then **Start**.
+4. The phone becomes secondary: occasional spoken cues and haptics only at meaningful moments (turn, off-route, recovery, mission pacing).
+5. Complete the walk, note which missions you noticed, and get a report: outdoor time, uninterrupted time, route completion, missions noticed, digital intrusion score, physical engagement score, AI disappearance rate.
 
-   ```bash
-   npx expo start
-   ```
+Scores and screen values are OFFLINE-defined experimental metrics, measured inside the app only. The app does not claim system-wide unlock counts or screen-on time.
 
-In the output, you'll find options to open the app in a
+## Architecture
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```text
+React Native + Expo
+  -> SQLite (experiences, sessions, metrics, session events)
+  -> GPS and deterministic route/safety logic
+  -> LocalModel abstraction (Mock planner by default, TinyLlama optional)
+  -> device text-to-speech
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+`LocalModel` is the application boundary. The default is `MockModel` (deterministic, no download, no inference). The on-device TinyLlama path remains available by setting `integrationConfig.ai.provider = 'tinyllama'` in `src/config/integrations.ts` — see `docs/integrations.md`.
 
-### Other setup steps
+## Development
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+```bash
+npm install
+npx expo start
+```
 
-## Learn more
+Build the native development app normally:
 
-To learn more about developing your project with Expo, look at the following resources:
+```bash
+npm run ios
+npm run android
+```
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+Native builds use `react-native-maps` (Apple/Google tiles) for planning preview and fallback navigation. The web build renders an explicit cached-route preview. A network connection is not required to start a prepared experience; GPS is, for live navigation — with a clear fallback when it is unavailable.
 
-## Join the community
+The TinyLlama native module (`llama.rn`) requires an Expo development or release build; it is not used by the default Mock planner.
 
-Join our community of developers creating universal apps.
+## Testing
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+```bash
+npx tsc --noEmit
+npx expo lint
+npm test
+```
+
+Tests cover the Mock planner (schema/safety validation, determinism, cue rules), experience validation, navigation, safety, audio-priority, and the SQLite repository (schema migration 1–2, persistence, session events) against an in-memory SQLite double.
+
+## Product boundaries
+
+Route geometry and safety decisions are deterministic; the model layer only writes short natural-language cues and experience text. Voice is always the device's system TTS. SQLite, random route generation, configurable movement checks, and optional Spotify handoff remain independent local walking features.
+
+Project metrics are experimental and not clinically validated. OFFLINE is a behavioral research prototype, not a medical product.
