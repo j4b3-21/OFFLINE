@@ -1,98 +1,714 @@
-import * as Device from 'expo-device';
-import { Platform, StyleSheet } from 'react-native';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  AppState,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  TextInput,
+  View,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { AnimatedIcon } from '@/components/animated-icon';
-import { HintRow } from '@/components/hint-row';
+import { ExperienceEngine } from '@/experience/experience-engine';
+import {
+  getExperience,
+  getLatestOpenSession,
+  initializeDatabase,
+  recordSessionEvent,
+  saveExperience,
+  saveSession,
+} from '@/data/database';
+import {
+  audioGuidance,
+  signalGuidance,
+} from '@/interaction/guidance';
+import {
+  createSession,
+  createSessionReport,
+  transitionSession,
+} from '@/session/session-engine';
+import type { ExperiencePlan, Location, SessionRecord } from '@/domain/experience';
+import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { WebBadge } from '@/components/web-badge';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { useTheme } from '@/hooks/use-theme';
+import { MapPreview } from '@/components/map-preview';
+import { deviceLocationProvider } from '@/location/location-provider';
+import {
+  createNavigationState,
+  updateNavigationState,
+  type NavigationState,
+} from '@/navigation/navigation-engine';
+import { safetyEngine } from '@/safety/safety-engine';
+import { activeModel, modelSetupRequired } from '@/ai/active-model';
+import { localModelManager, type ModelDownloadProgress } from '@/ai/tinyllama/tinyllama-model-manager';
+import { integrationConfig } from '@/config/integrations';
+import { SystemVoiceProvider } from '@/voice/voice-provider';
+import { QueuedVoiceProvider } from '@/voice/voice-queue';
+import { DEFAULT_WALKING_CONFIG, WALKING_INTERVAL_OPTIONS, type WalkingConfig } from '@/walking/walking-config';
+import { WalkingMonitor } from '@/walking/walking-monitor';
+import type { WalkingSnapshot } from '@/walking/walking-types';
 
-function getDevMenuHint() {
-  if (Platform.OS === 'web') {
-    return <ThemedText type="small">use browser devtools</ThemedText>;
-  }
-  if (Device.isDevice) {
-    return (
-      <ThemedText type="small">
-        shake device or press <ThemedText type="code">m</ThemedText> in terminal
-      </ThemedText>
-    );
-  }
-  const shortcut = Platform.OS === 'android' ? 'cmd+m (or ctrl+m)' : 'cmd+d';
-  return (
-    <ThemedText type="small">
-      press <ThemedText type="code">{shortcut}</ThemedText>
-    </ThemedText>
-  );
-}
+const engine = new ExperienceEngine(activeModel);
 
 export default function HomeScreen() {
+  const theme = useTheme();
+  const [duration, setDuration] = useState('30');
+  const [plan, setPlan] = useState<ExperiencePlan>();
+  const [session, setSession] = useState<SessionRecord>();
+  const [loading, setLoading] = useState(false);
+  const [databaseReady, setDatabaseReady] = useState(false);
+  const [location, setLocation] = useState<Location>();
+  const [locationMessage, setLocationMessage] = useState('Location is requested when you start.');
+  const [navigation, setNavigation] = useState<NavigationState>();
+  const walkingMonitorRef = useRef<WalkingMonitor | undefined>(undefined);
+  const [walkingConfig, setWalkingConfig] = useState<WalkingConfig>(DEFAULT_WALKING_CONFIG);
+  const [walkingSnapshot, setWalkingSnapshot] = useState<WalkingSnapshot>();
+  const [downloadDialogVisible, setDownloadDialogVisible] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<ModelDownloadProgress>();
+  const [downloadLoading, setDownloadLoading] = useState(false);
+  const downloadCancelledRef = useRef(false);
+
+  // Honest, app-local session metrics. Everything here is measured inside
+  // OFFLINE itself: foreground time while the session is ACTIVE, returns to
+  // the app while ACTIVE (a proxy for "checks"), and paused time. Platform
+  // screen-on / unlock counts are not available, so they are never claimed.
+  const screenForegroundMsRef = useRef(0);
+  const foregroundSinceRef = useRef<number | undefined>(undefined);
+  const screenChecksRef = useRef(0);
+  const pausedMsRef = useRef(0);
+  const pauseStartRef = useRef<number | undefined>(undefined);
+  const [notedMissionIds, setNotedMissionIds] = useState<string[]>([]);
+
+  // Guidance + event logging react to navigation transitions, not to every GPS point.
+  const navigationStatusRef = useRef<string | undefined>(undefined);
+  const navigationSegmentRef = useRef(-1);
+
+  useEffect(() => {
+    initializeDatabase()
+      .then(async () => {
+        const openSession = await getLatestOpenSession();
+        if (openSession) {
+          const savedPlan = await getExperience(openSession.experienceId);
+          if (savedPlan) {
+            const recoveredSession =
+              openSession.status === 'STARTED' ? { ...openSession, status: 'ACTIVE' as const } : openSession;
+            setPlan(savedPlan);
+            setSession(recoveredSession);
+            setNavigation(createNavigationState(savedPlan.route));
+            if (openSession.status === 'ACTIVE') {
+              setLocationMessage('Recovered an unfinished session. Your saved route is ready.');
+            }
+          }
+        }
+        setDatabaseReady(true);
+      })
+      .catch(() => Alert.alert('Storage unavailable', 'The local session database could not be opened.'));
+  }, []);
+
+  useEffect(() => () => {
+    void walkingMonitorRef.current?.stop();
+  }, []);
+
+  const sessionActive = session?.status === 'ACTIVE';
+
+  // Measure app-visible time and returns-to-app only while a session is ACTIVE.
+  useEffect(() => {
+    if (!sessionActive) return;
+    foregroundSinceRef.current = AppState.currentState === 'active' ? Date.now() : undefined;
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        screenChecksRef.current += 1;
+        foregroundSinceRef.current = Date.now();
+      } else if (foregroundSinceRef.current !== undefined) {
+        screenForegroundMsRef.current += Date.now() - foregroundSinceRef.current;
+        foregroundSinceRef.current = undefined;
+      }
+    });
+    return () => {
+      if (foregroundSinceRef.current !== undefined) {
+        screenForegroundMsRef.current += Date.now() - foregroundSinceRef.current;
+        foregroundSinceRef.current = undefined;
+      }
+      subscription.remove();
+    };
+  }, [sessionActive]);
+
+  // Accumulate paused time so "uninterrupted minutes" reflects real pauses.
+  const walkingStatus = walkingSnapshot?.status;
+  useEffect(() => {
+    if (walkingStatus === 'PAUSED') {
+      pauseStartRef.current ??= Date.now();
+    } else if (pauseStartRef.current !== undefined) {
+      pausedMsRef.current += Date.now() - pauseStartRef.current;
+      pauseStartRef.current = undefined;
+    }
+  }, [walkingStatus]);
+
+  // React only to navigation state transitions: off-route, recovery, and
+  // segment advances are the moments that deserve haptic guidance.
+  useEffect(() => {
+    if (!navigation || !session || session.status !== 'ACTIVE') return;
+    const previousStatus = navigationStatusRef.current;
+    if (previousStatus === undefined) {
+      navigationStatusRef.current = navigation.status;
+      navigationSegmentRef.current = navigation.currentSegmentIndex;
+      return;
+    }
+    if (navigation.status === 'OFF_ROUTE' && previousStatus !== 'OFF_ROUTE') {
+      void recordSessionEvent(session.id, 'NAVIGATION_OFF_ROUTE').catch(() => undefined);
+      void signalGuidance('attention');
+    } else if (previousStatus === 'OFF_ROUTE' && navigation.status !== 'OFF_ROUTE') {
+      void recordSessionEvent(session.id, 'ROUTE_RECOVERED').catch(() => undefined);
+      void signalGuidance('continue');
+    }
+    if (
+      navigation.status !== 'OFF_ROUTE' &&
+      navigation.currentSegmentIndex > navigationSegmentRef.current
+    ) {
+      void signalGuidance('turn');
+    }
+    navigationStatusRef.current = navigation.status;
+    navigationSegmentRef.current = navigation.currentSegmentIndex;
+  }, [navigation, session]);
+
+  const report = useMemo(
+    () => (plan && session?.status === 'COMPLETED' ? createSessionReport(session, plan) : undefined),
+    [plan, session],
+  );
+
+  // One mission at a time during the walk, advanced by route progress so the
+  // active screen stays minimal and needs no interaction to track.
+  const currentMission = (() => {
+    if (!plan || session?.status !== 'ACTIVE') return undefined;
+    const segments = Math.max(1, plan.route.points.length - 1);
+    const progress = Math.min(1, (navigation?.currentSegmentIndex ?? 0) / segments);
+    const index = Math.min(plan.missions.length - 1, Math.floor(progress * plan.missions.length));
+    return plan.missions[Math.max(0, index)];
+  })();
+
+  function toggleMission(missionId: string) {
+    if (!session || session.status !== 'COMPLETED') return;
+    const wasNoted = notedMissionIds.includes(missionId);
+    const next = wasNoted
+      ? notedMissionIds.filter((id) => id !== missionId)
+      : [...notedMissionIds, missionId];
+    setNotedMissionIds(next);
+    const updated: SessionRecord = {
+      ...session,
+      metrics: { ...session.metrics, missionCompletions: next.length },
+    };
+    setSession(updated);
+    void saveSession(updated);
+    void recordSessionEvent(
+      session.id,
+      wasNoted ? 'MISSION_UNNOTED' : 'MISSION_NOTED',
+      missionId,
+    ).catch(() => undefined);
+  }
+
+  async function generateExperience() {
+    const minutes = Number(duration);
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 240) {
+      Alert.alert('Choose a valid duration', 'Enter between 1 and 240 minutes.');
+      return;
+    }
+
+    if (modelSetupRequired && !(await localModelManager.isDownloaded())) {
+      setDownloadDialogVisible(true);
+      return;
+    }
+
+    setLoading(true);
+    // Fresh session, fresh honest counters.
+    screenForegroundMsRef.current = 0;
+    foregroundSinceRef.current = undefined;
+    screenChecksRef.current = 0;
+    pausedMsRef.current = 0;
+    pauseStartRef.current = undefined;
+    setNotedMissionIds([]);
+    setWalkingSnapshot(undefined);
+    navigationStatusRef.current = undefined;
+    navigationSegmentRef.current = -1;
+    try {
+      let planningLocation: Location | undefined;
+      try {
+        if (await deviceLocationProvider.requestPermission() === 'granted') {
+          planningLocation = await deviceLocationProvider.getCurrentLocation();
+          setLocation(planningLocation);
+        }
+      } catch {
+        setLocationMessage('Location is unavailable. Using a cached route template.');
+      }
+      const nextPlan = await engine.create(minutes, planningLocation);
+      const safety = safetyEngine.validateExperience(nextPlan);
+      if (!safety.safe) throw new Error(safety.reasons.join(' '));
+      await saveExperience(nextPlan);
+      const nextSession = transitionSession(createSession(nextPlan.id), 'PLANNED');
+      await saveSession(nextSession);
+      void recordSessionEvent(nextSession.id, 'SESSION_CREATED').catch(() => undefined);
+      void recordSessionEvent(nextSession.id, 'EXPERIENCE_GENERATED', nextPlan.id).catch(() => undefined);
+      setPlan(nextPlan);
+      setSession(nextSession);
+      setNavigation(createNavigationState(nextPlan.route));
+    } catch (error) {
+      Alert.alert('Could not prepare experience', error instanceof Error ? error.message : 'Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function downloadModel() {
+    setDownloadLoading(true);
+    setDownloadProgress(undefined);
+    downloadCancelledRef.current = false;
+    try {
+      await localModelManager.download(setDownloadProgress);
+      setDownloadDialogVisible(false);
+    } catch (error) {
+      if (!downloadCancelledRef.current) {
+        Alert.alert('Download failed', error instanceof Error ? error.message : 'Please try again.');
+      }
+    } finally {
+      setDownloadLoading(false);
+    }
+  }
+
+  async function startExperience() {
+    if (!plan || !session) return;
+    if (walkingMonitorRef.current) return;
+    let permission = 'undetermined';
+    try {
+      permission = await deviceLocationProvider.requestPermission();
+      if (permission !== 'granted') {
+        setLocationMessage('Location permission was not granted. Continuing with the saved route.');
+        const started = transitionSession(session, 'STARTED');
+        const active = transitionSession(started, 'ACTIVE');
+        await saveSession(active);
+        setSession(active);
+        void recordSessionEvent(active.id, 'SESSION_STARTED').catch(() => undefined);
+        await audioGuidance.speak('Location is unavailable. Follow the saved route and put your phone away.');
+        return;
+      }
+      const provider = new SystemVoiceProvider({
+        ...integrationConfig.voice,
+        enabled: walkingConfig.voiceEnabled,
+      });
+      const queuedVoice = new QueuedVoiceProvider(provider);
+      const monitor = new WalkingMonitor({
+        model: activeModel,
+        voice: queuedVoice,
+        voiceProvider: 'system',
+        getCurrentLocation: () => deviceLocationProvider.getCurrentLocation(),
+        subscribeToLocation: deviceLocationProvider.watchLocation,
+        config: walkingConfig,
+        routeSeed: plan.routeSeed ?? 0,
+      });
+      monitor.subscribe((snapshot) => {
+        setWalkingSnapshot(snapshot);
+        if (snapshot.currentPosition) {
+          setLocation(snapshot.currentPosition);
+          setNavigation((previous) =>
+            previous ? updateNavigationState(plan.route, snapshot.currentPosition!, previous) : previous,
+          );
+        }
+      });
+      walkingMonitorRef.current = monitor;
+      await monitor.start();
+      setLocationMessage('Location active. Keep the phone down; cues are occasional.');
+      const started = transitionSession(session, 'STARTED');
+      const active = transitionSession(started, 'ACTIVE');
+      await saveSession(active);
+      setSession(active);
+      void recordSessionEvent(active.id, 'SESSION_STARTED').catch(() => undefined);
+      await signalGuidance('continue');
+    } catch (error) {
+      await walkingMonitorRef.current?.stop();
+      walkingMonitorRef.current = undefined;
+      setLocationMessage(error instanceof Error ? error.message : 'Location is unavailable.');
+      await audioGuidance.speak('Location is unavailable. Follow the saved route and put your phone away.');
+    }
+  }
+
+  async function completeExperience() {
+    if (!plan || !session) return;
+    await walkingMonitorRef.current?.stop();
+    walkingMonitorRef.current = undefined;
+    // Flush open measurement windows before snapshotting the metrics.
+    if (foregroundSinceRef.current !== undefined) {
+      screenForegroundMsRef.current += Date.now() - foregroundSinceRef.current;
+      foregroundSinceRef.current = undefined;
+    }
+    if (pauseStartRef.current !== undefined) {
+      pausedMsRef.current += Date.now() - pauseStartRef.current;
+      pauseStartRef.current = undefined;
+    }
+    const totalMs = session.startedAt
+      ? Math.max(0, Date.now() - Date.parse(session.startedAt))
+      : plan.durationMinutes * 60_000;
+    const completed = transitionSession(
+      {
+        ...session,
+        metrics: {
+          ...session.metrics,
+          screenInteractions: screenChecksRef.current,
+          screenSeconds: Math.round(screenForegroundMsRef.current / 1000),
+          // One planning interaction plus every spoken walking cue.
+          aiInteractions: 1 + (walkingSnapshot?.recentCueHistory.length ?? 0),
+          // Missions stay at zero until the user marks them on the report.
+          missionCompletions: notedMissionIds.length,
+          routeCompleted: navigation?.status === 'COMPLETED',
+          uninterruptedMinutes: Math.floor(Math.max(0, totalMs - pausedMsRef.current) / 60_000),
+        },
+      },
+      'COMPLETED',
+    );
+    await saveSession(completed);
+    setSession(completed);
+    void recordSessionEvent(completed.id, 'SESSION_COMPLETED').catch(() => undefined);
+    await signalGuidance('attention');
+  }
+
   return (
     <ThemedView style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        <ThemedView style={styles.heroSection}>
-          <AnimatedIcon />
-          <ThemedText type="title" style={styles.title}>
-            Welcome to&nbsp;Expo
+        <ScrollView
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled">
+          <ThemedText type="small" themeColor="textSecondary" style={styles.eyebrow}>
+            LOCAL OUTDOOR EXPERIENCE
           </ThemedText>
-        </ThemedView>
+          <ThemedText type="title" style={styles.title}>
+            Get out of the way.
+          </ThemedText>
+          <ThemedText themeColor="textSecondary" style={styles.intro}>
+            OFFLINE prepares a quiet walk, then asks less of you.
+          </ThemedText>
 
-        <ThemedText type="code" style={styles.code}>
-          get started
-        </ThemedText>
+          {!plan && (
+            <ThemedView type="backgroundElement" style={styles.card}>
+              <ThemedText type="subtitle">How long do you have?</ThemedText>
+              <View style={styles.durationRow}>
+                <TextInput
+                  accessibilityLabel="Duration in minutes"
+                  keyboardType="number-pad"
+                  maxLength={3}
+                  onChangeText={setDuration}
+                  placeholder="30"
+                  placeholderTextColor={theme.textSecondary}
+                  style={[styles.durationInput, { color: theme.text, borderColor: theme.textSecondary }]}
+                  value={duration}
+                />
+                <ThemedText>minutes</ThemedText>
+              </View>
+              <PrimaryButton
+                disabled={!databaseReady || loading}
+                label={loading ? 'Preparing...' : 'Prepare my experience'}
+                onPress={generateExperience}
+              />
+              <ThemedText type="small" themeColor="textSecondary">
+                {modelSetupRequired
+                  ? 'TinyLlama runs on this device after a one-time download. No account or cloud AI is used.'
+                  : 'The planner runs locally and deterministically. No account, no cloud AI, no download.'}
+              </ThemedText>
+            </ThemedView>
+          )}
 
-        <ThemedView type="backgroundElement" style={styles.stepContainer}>
-          <HintRow
-            title="Try editing"
-            hint={<ThemedText type="code">src/app/index.tsx</ThemedText>}
-          />
-          <HintRow title="Dev tools" hint={getDevMenuHint()} />
-          <HintRow
-            title="Fresh start"
-            hint={<ThemedText type="code">npm run reset-project</ThemedText>}
-          />
-        </ThemedView>
+          {plan && session && session.status === 'PLANNED' && (
+            <PlanCard plan={plan} location={location} onStart={startExperience} />
+          )}
 
-        {Platform.OS === 'web' && <WebBadge />}
+          {plan && session && session.status === 'ACTIVE' && (
+            <ThemedView type="backgroundElement" style={styles.card}>
+              <ThemedText type="subtitle">Disappear mode</ThemedText>
+              <ThemedText style={styles.body}>
+                The phone is now a fallback. Follow the route, notice what is around you, and return when you are ready.
+              </ThemedText>
+              <View style={styles.statusPill}>
+                <ThemedText type="smallBold">ACTIVE · SCREEN DOWN</ThemedText>
+              </View>
+              <MapPreview plan={plan} location={location} />
+              <ThemedText type="small" themeColor="textSecondary">
+                {walkingSnapshot?.error ?? (navigation?.status === 'OFF_ROUTE'
+                  ? 'You appear off the saved route. Stop and use normal navigation if you are unsure.'
+                  : locationMessage)}
+              </ThemedText>
+              <ThemedText type="smallBold">
+                {activeModel.metadata().displayName} · {walkingSnapshot?.movementState ?? 'stationary'}
+              </ThemedText>
+              <ThemedText type="small" themeColor="textSecondary">
+                Distance since check: {Math.round(walkingSnapshot?.distanceMovedMeters ?? 0)} m · next check:{' '}
+                {walkingSnapshot?.nextCheckAt ? `${walkingConfig.aiCheckIntervalMs / 1000}s interval` : 'waiting'}
+              </ThemedText>
+              <View style={styles.intervalRow}>
+                {WALKING_INTERVAL_OPTIONS.map((option) => (
+                  <Pressable
+                    key={option.value}
+                    onPress={() => {
+                      const nextConfig = { ...walkingConfig, aiCheckIntervalMs: option.value };
+                      setWalkingConfig(nextConfig);
+                      walkingMonitorRef.current?.updateConfig(nextConfig);
+                    }}
+                    style={[styles.intervalButton, walkingConfig.aiCheckIntervalMs === option.value && styles.intervalButtonSelected]}>
+                    <ThemedText type="small">{option.label}</ThemedText>
+                  </Pressable>
+                ))}
+              </View>
+              {walkingSnapshot?.status === 'PAUSED' ? (
+                <PrimaryButton label="Resume walking" onPress={() => walkingMonitorRef.current?.resume()} />
+              ) : (
+                <PrimaryButton label="Pause walking" onPress={() => walkingMonitorRef.current?.pause()} />
+              )}
+              {navigation?.nextInstruction && navigation.status !== 'COMPLETED' && (
+                <ThemedText style={styles.nextInstruction}>
+                  Next: {navigation.nextInstruction.text}
+                </ThemedText>
+              )}
+              {currentMission && (
+                <ThemedText style={styles.nextInstruction}>
+                  Mission: {currentMission.prompt}
+                </ThemedText>
+              )}
+              <PrimaryButton label="I’m back" onPress={completeExperience} />
+            </ThemedView>
+          )}
+
+          {report && plan && (
+            <ThemedView type="backgroundElement" style={styles.card}>
+              <ThemedText type="subtitle">Welcome back.</ThemedText>
+              <ThemedText style={styles.body}>You did not need the AI for most of the walk.</ThemedText>
+              <Metric label="Outdoor time" value={`${report.durationMinutes} min`} />
+              <Metric label="Uninterrupted time" value={`${report.uninterruptedMinutes} min`} />
+              <Metric
+                label="Route completed"
+                value={report.routeCompleted ? 'Yes' : 'Not quite'}
+              />
+              <Metric
+                label="Missions noticed"
+                value={`${report.missionCompletions} / ${plan.missions.length}`}
+              />
+              <Metric label="Digital intrusion score" value={`${report.digitalIntrusionScore}`} />
+              <Metric label="Physical engagement score" value={`${report.physicalEngagementScore}`} />
+              <Metric label="AI disappearance rate" value={`${Math.round(report.aiDisappearanceRate * 100)}%`} />
+              {plan.missions.length > 0 && (
+                <>
+                  <ThemedText type="smallBold" style={styles.sectionLabel}>
+                    Which did you notice? (optional)
+                  </ThemedText>
+                  {plan.missions.map((mission) => {
+                    const noted = notedMissionIds.includes(mission.id);
+                    return (
+                      <Pressable
+                        key={mission.id}
+                        accessibilityRole="checkbox"
+                        accessibilityState={{ checked: noted }}
+                        onPress={() => toggleMission(mission.id)}
+                        style={styles.missionRow}>
+                        <ThemedText themeColor={noted ? 'text' : 'textSecondary'}>
+                          {noted ? '✓ ' : '○ '}
+                          {mission.prompt}
+                        </ThemedText>
+                      </Pressable>
+                    );
+                  })}
+                </>
+              )}
+              <ThemedText type="small" themeColor="textSecondary">
+                Scores are OFFLINE-defined experimental metrics. Screen values are app-local proxies
+                measured during this session; unlock counts are not available on this platform.
+              </ThemedText>
+              <PrimaryButton
+                label="Plan another quiet walk"
+                onPress={() => {
+                  setPlan(undefined);
+                  setSession(undefined);
+                }}
+              />
+            </ThemedView>
+          )}
+        </ScrollView>
       </SafeAreaView>
+      <Modal
+        animationType="fade"
+        transparent
+        visible={downloadDialogVisible}
+        onRequestClose={() => {
+          if (!downloadLoading) setDownloadDialogVisible(false);
+        }}>
+        <View style={styles.modalBackdrop}>
+          <ThemedView type="backgroundElement" style={styles.downloadCard}>
+            <ThemedText type="subtitle">Set up local AI</ThemedText>
+            <ThemedText themeColor="textSecondary">
+              TinyLlama is downloaded once to this device ({Math.round(integrationConfig.model.sizeBytes / 1_000_000)} MB).
+              It stays available offline after that.
+            </ThemedText>
+            {downloadLoading && (
+              <>
+                <View style={styles.progressTrack}>
+                  <View
+                    style={[
+                      styles.progressFill,
+                      { width: `${Math.round((downloadProgress?.fraction ?? 0) * 100)}%` },
+                    ]}
+                  />
+                </View>
+                <ThemedText type="small" themeColor="textSecondary">
+                  {downloadProgress ? `${Math.round(downloadProgress.fraction * 100)}% downloaded` : 'Starting download...'}
+                </ThemedText>
+              </>
+            )}
+            {!downloadLoading && (
+              <PrimaryButton label="Download TinyLlama" onPress={downloadModel} />
+            )}
+            {downloadLoading ? (
+              <Pressable
+                onPress={() => {
+                  downloadCancelledRef.current = true;
+                  void localModelManager.cancelDownload().then(() => {
+                    setDownloadLoading(false);
+                    setDownloadProgress(undefined);
+                  });
+                }}
+                style={styles.cancelButton}>
+                <ThemedText type="smallBold">Cancel download</ThemedText>
+              </Pressable>
+            ) : (
+              <Pressable onPress={() => setDownloadDialogVisible(false)} style={styles.cancelButton}>
+                <ThemedText type="smallBold">Not now</ThemedText>
+              </Pressable>
+            )}
+          </ThemedView>
+        </View>
+      </Modal>
     </ThemedView>
   );
 }
 
+function PlanCard({
+  plan,
+  location,
+  onStart,
+}: {
+  plan: ExperiencePlan;
+  location?: Location;
+  onStart: () => void;
+}) {
+  return (
+    <ThemedView type="backgroundElement" style={styles.card}>
+      <ThemedText type="subtitle">Your experience is ready.</ThemedText>
+      <ThemedText style={styles.routeSummary}>{plan.route.summary}</ThemedText>
+      <ThemedText themeColor="textSecondary">
+        {plan.route.distanceKm} km · about {plan.durationMinutes} minutes · offline
+      </ThemedText>
+      <MapPreview plan={plan} location={location} />
+      <ThemedText type="smallBold" style={styles.sectionLabel}>Landmarks</ThemedText>
+      {plan.landmarks.map((landmark) => (
+        <View key={landmark.id} style={styles.landmark}>
+          <ThemedText type="smallBold">{landmark.title}</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary">{landmark.description}</ThemedText>
+        </View>
+      ))}
+      <ThemedText type="smallBold" style={styles.sectionLabel}>Try noticing</ThemedText>
+      {plan.missions.map((mission) => (
+        <View key={mission.id} style={styles.mission}>
+          <ThemedText style={styles.missionDot}>•</ThemedText>
+          <ThemedText style={styles.missionText}>{mission.prompt}</ThemedText>
+        </View>
+      ))}
+      <ThemedText type="small" themeColor="textSecondary">
+        Attention budget: {plan.attentionBudget.maxScreenInteractions} screen checks,{' '}
+        {plan.attentionBudget.maxScreenSeconds} seconds on screen.
+      </ThemedText>
+      <PrimaryButton label="Start · put phone away" onPress={onStart} />
+    </ThemedView>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.metric}>
+      <ThemedText themeColor="textSecondary">{label}</ThemedText>
+      <ThemedText type="smallBold">{value}</ThemedText>
+    </View>
+  );
+}
+
+function PrimaryButton({
+  label,
+  onPress,
+  disabled = false,
+}: {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [styles.button, disabled && styles.buttonDisabled, pressed && styles.buttonPressed]}>
+      {disabled ? <ActivityIndicator color="#ffffff" /> : <ThemedText style={styles.buttonText}>{label}</ThemedText>}
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-    flexDirection: 'row',
-  },
-  safeArea: {
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    alignItems: 'center',
-    gap: Spacing.three,
-    paddingBottom: BottomTabInset + Spacing.three,
+  container: { flex: 1 },
+  safeArea: { flex: 1 },
+  content: {
+    width: '100%',
     maxWidth: MaxContentWidth,
-  },
-  heroSection: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: 1,
+    alignSelf: 'center',
     paddingHorizontal: Spacing.four,
-    gap: Spacing.four,
-  },
-  title: {
-    textAlign: 'center',
-  },
-  code: {
-    textTransform: 'uppercase',
-  },
-  stepContainer: {
+    paddingTop: Spacing.five,
+    paddingBottom: BottomTabInset + Spacing.five,
     gap: Spacing.three,
-    alignSelf: 'stretch',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.four,
-    borderRadius: Spacing.four,
   },
+  eyebrow: { letterSpacing: 1.5 },
+  title: { fontSize: 44, lineHeight: 48, maxWidth: 360 },
+  intro: { fontSize: 18, lineHeight: 26, maxWidth: 360 },
+  card: { borderRadius: 24, padding: Spacing.four, gap: Spacing.three },
+  durationRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
+  durationInput: {
+    borderWidth: 1,
+    borderRadius: 12,
+    fontSize: 24,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    width: 110,
+  },
+  button: {
+    alignItems: 'center',
+    backgroundColor: '#1e6b52',
+    borderRadius: 14,
+    minHeight: 52,
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.three,
+  },
+  buttonDisabled: { opacity: 0.5 },
+  buttonPressed: { opacity: 0.8 },
+  buttonText: { color: '#ffffff', fontWeight: '700' },
+  body: { fontSize: 17, lineHeight: 26 },
+  routeSummary: { fontSize: 20, lineHeight: 28, fontWeight: '700' },
+  nextInstruction: { fontSize: 19, lineHeight: 28, fontWeight: '700' },
+  landmark: { borderLeftColor: '#d47c46', borderLeftWidth: 3, gap: 2, paddingLeft: Spacing.two },
+  sectionLabel: { marginTop: Spacing.two },
+  missionRow: { paddingVertical: Spacing.one },
+  mission: { flexDirection: 'row', gap: Spacing.two, alignItems: 'flex-start' },
+  missionDot: { color: '#1e6b52', fontSize: 20, lineHeight: 24 },
+  missionText: { flex: 1 },
+  statusPill: { alignSelf: 'flex-start', backgroundColor: '#d7eadf', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
+  metric: { flexDirection: 'row', justifyContent: 'space-between', borderBottomColor: '#c9cec9', borderBottomWidth: 1, paddingVertical: Spacing.two },
+  intervalRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.one },
+  intervalButton: { borderColor: '#aeb8b0', borderRadius: 10, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 7 },
+  intervalButtonSelected: { backgroundColor: '#d7eadf', borderColor: '#1e6b52' },
+  modalBackdrop: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.35)', padding: Spacing.four },
+  downloadCard: { width: '100%', maxWidth: 360, borderRadius: 20, padding: Spacing.four, gap: Spacing.three },
+  progressTrack: { height: 8, width: '100%', overflow: 'hidden', borderRadius: 999, backgroundColor: '#d6ddd8' },
+  progressFill: { height: '100%', borderRadius: 999, backgroundColor: '#1e6b52' },
+  cancelButton: { alignItems: 'center', paddingVertical: Spacing.one },
 });
